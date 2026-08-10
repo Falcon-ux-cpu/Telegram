@@ -6,7 +6,7 @@ import mimetypes
 import uuid
 from datetime import timedelta
 from email.message import EmailMessage
-import httpx  # Используется для официального REST API Яндекс Диска
+import httpx  # Используется для REST API Яндекса и загрузки Gist
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.types import MessageMediaPoll, MessageEntityTextUrl
@@ -22,81 +22,92 @@ SENDER_EMAIL = os.getenv('MAIL_SENDER')
 SENDER_PASS = os.getenv('MAIL_PASS')
 RECEIVER_EMAIL = os.getenv('MAIL_RECEIVER')
 MAX_EMAIL_SIZE = 24 * 1024 * 1024 
-YANDEX_DISK_TOKEN = os.getenv('YANDEX_DISK_TOKEN')  # Токен Яндекс Диска
+YANDEX_DISK_TOKEN = os.getenv('YANDEX_DISK_TOKEN')
 
-# Путь для временных файлов перед отправкой
+# Прямая ссылка на RAW-версию твоего Gist со списком VPN-каналов
+VPN_GIST_URL = os.getenv('VPN_GIST_URL', '')
+
 RAM_PATH = os.path.join(os.getcwd(), 'temp_media')
 os.makedirs(RAM_PATH, exist_ok=True)
 
-# Путь для сохранения больших файлов перед выгрузкой в облако
 LARGE_MEDIA_PATH = os.path.join(os.getcwd(), 'saved_large_media')
 os.makedirs(LARGE_MEDIA_PATH, exist_ok=True)
 
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 mail_queue = asyncio.Queue()
 
+async def fetch_vpn_channels_list():
+    """Загружает список VPN-каналов из GitHub Gist"""
+    if not VPN_GIST_URL:
+        print("ℹ️ VPN_GIST_URL не задан. Все письма будут отправляться с темой Telegram.")
+        return set()
+    
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as http_client:
+            res = await http_client.get(VPN_GIST_URL)
+            if res.status_code == 200:
+                lines = res.text.splitlines()
+                # Очищаем строки, убираем @, пустые строки и пробелы
+                vpn_list = set()
+                for line in lines:
+                    item = line.strip().lstrip('@').lower()
+                    if item:
+                        vpn_list.add(item)
+                print(f"📋 Загружен список VPN-каналов ({len(vpn_list)} шт.) из Gist")
+                return vpn_list
+            else:
+                print(f"⚠️ Ошибка загрузки Gist: Статус {res.status_code}")
+    except Exception as e:
+        print(f"⚠️ Не удалось загрузить список VPN-каналов из Gist: {e}")
+    
+    return set()
+
 def read_file_sync(path):
-    """Синхронное чтение файла для безопасного выполнения в отдельном потоке"""
     with open(path, "rb") as f:
         return f.read()
 
 async def upload_to_yandex_disk(local_path, filename):
-    """Загружает файл на Яндекс Диск через официальный REST API без блокировки event loop"""
     if not YANDEX_DISK_TOKEN:
         print("❌ Ошибка: YANDEX_DISK_TOKEN не задан в secrets!")
         return None
 
     unique_filename = f"{uuid.uuid4().hex[:8]}_{filename}"
     headers = {"Authorization": f"OAuth {YANDEX_DISK_TOKEN}"}
-    
-    # Большой таймаут для загрузки и коннекта
     timeout = httpx.Timeout(900.0, connect=90.0)
     
     async with httpx.AsyncClient(timeout=timeout) as http_client:
         try:
-            # Шаг 1: Запрашиваем у Яндекса ссылку для загрузки
             get_upload_url = "https://cloud-api.yandex.net/v1/disk/resources/upload"
             params = {"path": f"/{unique_filename}", "overwrite": "true"}
             
             url_res = await http_client.get(get_upload_url, params=params, headers=headers)
             if url_res.status_code != 200:
-                print(f"❌ Не удалось получить ссылку для загрузки. Код: {url_res.status_code}")
                 return None
                 
             upload_url = url_res.json().get("href")
             if not upload_url:
-                print("❌ Ссылка для загрузки пустая в ответе Яндекса.")
                 return None
 
-            # Шаг 2: Читаем файл в отдельном потоке, чтобы избежать RuntimeError в AsyncClient
             file_content = await asyncio.to_thread(read_file_sync, local_path)
-
-            # Шаг 3: Отправляем байты файла на полученный URL
             upload_res = await http_client.put(upload_url, content=file_content)
                 
             if upload_res.status_code not in (201, 202):
-                print(f"❌ Ошибка отправки файла в облако. Код: {upload_res.status_code}")
                 return None
             
-            # Шаг 4: Публикуем файл
             publish_url = "https://cloud-api.yandex.net/v1/disk/resources/publish"
             pub_res = await http_client.put(publish_url, params={"path": f"/{unique_filename}"}, headers=headers)
             
             if pub_res.status_code == 200:
-                # Шаг 5: Забираем готовую публичную ссылку
                 meta_url = "https://cloud-api.yandex.net/v1/disk/resources"
                 meta_res = await http_client.get(meta_url, params={"path": f"/{unique_filename}"}, headers=headers)
                 if meta_res.status_code == 200:
                     return meta_res.json().get("public_url")
-            
-            print(f"❌ Не удалось опубликовать файл на Яндекс Диске. Статус: {pub_res.status_code}")
             return None
         except Exception as e:
-            print(f"❌ Исключение при интеграции с Яндекс Диском через REST API: {e!r}")
+            print(f"❌ Ошибка Яндекс Диска: {e!r}")
             return None
 
 async def send_mail_worker():
-    """Отправляет почту из очереди и завершается"""
     while not mail_queue.empty():
         subject, html_body, files = await mail_queue.get()
         try:
@@ -136,8 +147,7 @@ async def send_mail_worker():
 def get_html_text(msg):
     if not msg: return ""
     raw_text = msg.message or ""
-    if not raw_text:
-        return ""
+    if not raw_text: return ""
 
     if msg.entities:
         sorted_entities = sorted(msg.entities, key=lambda e: e.offset, reverse=True)
@@ -154,13 +164,22 @@ def get_html_text(msg):
     html_text = msg.text_html if hasattr(msg, 'text_html') and msg.text_html else raw_text
     return html_text.replace('\n', '<br>')
 
-async def process_messages(messages, chat_entity, mark_read=False):
+async def process_messages(messages, chat_entity, vpn_list, mark_read=False):
     if not messages: return
     first_msg = messages[0]
     chat_title = chat_entity.title
     
-    if getattr(chat_entity, 'username', None):
-        base_url = f"https://t.me/{chat_entity.username}"
+    # Определение темы письма (VPN или Telegram)
+    chat_username = (getattr(chat_entity, 'username', '') or '').lower()
+    chat_id_str = str(chat_entity.id)
+    
+    if chat_username in vpn_list or chat_id_str in vpn_list:
+        email_subject = "VPN"
+    else:
+        email_subject = "Telegram"
+
+    if chat_username:
+        base_url = f"https://t.me/{chat_username}"
     else:
         base_url = f"https://t.me/c/{chat_entity.id}"
 
@@ -204,17 +223,14 @@ async def process_messages(messages, chat_entity, mark_read=False):
             if path and os.path.exists(path):
                 f_name = os.path.basename(path)
                 print(f"💾 Файл {f_name} превысил лимит. Выгружаем на Яндекс Диск...")
-                
                 yandex_url = await upload_to_yandex_disk(path, f_name)
                 
                 if yandex_url:
-                    print(f"🚀 Файл успешно загружен на Яндекс Диск: {yandex_url}")
                     media_html += f'<br><p>📦 <b>Большой файл (загружен на Яндекс Диск):</b> <a href="{yandex_url}">{f_name}</a></p>'
                     if os.path.exists(path):
                         os.remove(path)
                 else:
-                    print(f"❌ Не удалось загрузить на Яндекс Диск. Файл сохранен в буфер LARGE_MEDIA_PATH.")
-                    media_html += f'<br><p>📦 <b>Большой файл (ошибка Я.Диска, сохранен в saved_large_media):</b> <code>{f_name}</code></p>'
+                    media_html += f'<br><p>📦 <b>Большой файл (ошибка Я.Диска, сохранен локально):</b> <code>{f_name}</code></p>'
         else:
             path = await msg.download_media(file=RAM_PATH)
             if path and os.path.exists(path):
@@ -278,13 +294,16 @@ async def process_messages(messages, chat_entity, mark_read=False):
     </html>
     """
     
-    await mail_queue.put(("Telegram", html_body, files))
+    # Отправляем в очередь с динамической темой
+    await mail_queue.put((email_subject, html_body, files))
     
     if mark_read:
         await client.send_read_acknowledge(first_msg.chat_id, max_id=max(m.id for m in messages))
 
 async def main():
     print("🚀 Подключение к Telegram...")
+    vpn_list = await fetch_vpn_channels_list()
+    
     async with client:
         async for dialog in client.iter_dialogs():
             if dialog.is_channel and dialog.unread_count > 0:
@@ -303,7 +322,7 @@ async def main():
                 all_batches = list(grouped.values()) + ungrouped
                 for i, batch in enumerate(all_batches):
                     should_mark = (i == len(all_batches) - 1)
-                    await process_messages(batch, chat_entity, mark_read=should_mark)
+                    await process_messages(batch, chat_entity, vpn_list, mark_read=should_mark)
     
     print("🔌 Соединение с Telegram закрыто.")
 
