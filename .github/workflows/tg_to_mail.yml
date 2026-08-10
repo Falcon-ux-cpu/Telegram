@@ -37,4 +37,5 @@ jobs:
           MAIL_PASS: ${{ secrets.MAIL_PASS }}
           MAIL_RECEIVER: ${{ secrets.MAIL_RECEIVER }}
           YANDEX_DISK_TOKEN: ${{ secrets.YANDEX_DISK_TOKEN }}
+          VPN_GIST_URL: ${{ secrets.VPN_GIST_URL }}
         run: python main.py
