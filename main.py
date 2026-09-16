@@ -84,7 +84,7 @@ async def upload_to_koofr_webdav(local_path, original_filename):
     async with httpx.AsyncClient(auth=auth, timeout=timeout) as http_client:
         try:
             # Автоматическое создание целевых папок /OMV/Github если они еще не созданы
-            for path_part in ["OMV", "OMV/Github"]:
+            for path_part in ["Github Actions", "Github Actions/Telegram"]:
                 folder_url = f"https://app.koofr.net/dav/Koofr/{path_part}"
                 await http_client.request("MKCOL", folder_url)
 
