@@ -36,6 +36,8 @@ jobs:
           MAIL_SENDER: ${{ secrets.MAIL_SENDER }}
           MAIL_PASS: ${{ secrets.MAIL_PASS }}
           MAIL_RECEIVER: ${{ secrets.MAIL_RECEIVER }}
-          YANDEX_DISK_TOKEN: ${{ secrets.YANDEX_DISK_TOKEN }}
+          KOOFR_EMAIL: ${{ secrets.KOOFR_EMAIL }}
+          KOOFR_PASS: ${{ secrets.KOOFR_PASS }}
           VPN_GIST_URL: ${{ secrets.VPN_GIST_URL }}
         run: python main.py
+        
