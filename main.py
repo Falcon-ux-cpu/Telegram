@@ -186,7 +186,7 @@ async def process_messages(messages, chat_entity, vpn_list, mark_read=False):
     media_html = ""
     poll_html = ""
 
-    total_size = sum(getattr(msg.file, 'size', 0) for msg in messages if msg.media)
+    IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.gif', '.webp')
 
     for msg in messages:
         if not msg.media:
@@ -212,22 +212,27 @@ async def process_messages(messages, chat_entity, vpn_list, mark_read=False):
             """
             continue
 
-        file_size = getattr(msg.file, 'size', 0)
-        
-        if total_size >= MAX_EMAIL_SIZE or file_size >= MAX_EMAIL_SIZE:
+        # Проверяем, является ли файл изображением
+        is_image = False
+        if msg.file and msg.file.ext:
+            is_image = msg.file.ext.lower() in IMAGE_EXTENSIONS
+
+        # Все не-картинки отправляем сразу на Koofr. Картинки превышающие лимит — тоже на Koofr.
+        if not is_image or (msg.file and msg.file.size >= MAX_EMAIL_SIZE):
             path = await msg.download_media(file=LARGE_MEDIA_PATH)
             if path and os.path.exists(path):
                 f_name = os.path.basename(path)
-                print(f"💾 Файл {f_name} превысил лимит. Выгружаем на Koofr...")
+                print(f"📦 Выгружаем файл на Koofr: {f_name}")
                 uploaded_name = await upload_to_koofr_webdav(path, f_name)
                 
                 if uploaded_name:
-                    media_html += f'<br><p>📦 <b>Большой файл (загружен на Koofr):</b> <code>{uploaded_name}</code></p>'
+                    media_html += f'<br><p>📦 <b>Файл (загружен на Koofr):</b> <code>{uploaded_name}</code></p>'
                     if os.path.exists(path):
                         os.remove(path)
                 else:
-                    media_html += f'<br><p>📦 <b>Большой файл (ошибка Koofr, сохранен локально):</b> <code>{f_name}</code></p>'
+                    media_html += f'<br><p>📦 <b>Файл (ошибка Koofr, сохранен локально):</b> <code>{f_name}</code></p>'
         else:
+            # Картинки в пределах нормального размера отправляем как вложение в письмо
             path = await msg.download_media(file=RAM_PATH)
             if path and os.path.exists(path):
                 f_name = os.path.basename(path)
@@ -237,13 +242,7 @@ async def process_messages(messages, chat_entity, vpn_list, mark_read=False):
                 
                 files.append((f_data, f_name, cid))
                 os.remove(path)
-                
-                if f_name.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp')):
-                    media_html += f'<br><img src="cid:{cid}" style="max-width: 100%;"><br>'
-                elif f_name.lower().endswith(('.mp3', '.ogg', '.wav', '.m4a')):
-                    media_html += f'<br><p>🎵 Аудиофайл: {f_name}</p>'
-                else:
-                    media_html += f'<br><p>📎 Вложение: {f_name}</p>'
+                media_html += f'<br><img src="cid:{cid}" style="max-width: 100%;"><br>'
     
     local_time = first_msg.date + timedelta(hours=5)
     pub_date = local_time.strftime("%d.%m.%Y %H:%M:%S")
@@ -332,4 +331,4 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
-            
+                
