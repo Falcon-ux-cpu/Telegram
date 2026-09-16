@@ -169,10 +169,8 @@ async def process_messages(messages, chat_entity, vpn_list, mark_read=False):
     chat_username = (getattr(chat_entity, 'username', '') or '').lower()
     chat_id_str = str(chat_entity.id)
     
-    if chat_username in vpn_list or chat_id_str in vpn_list:
-        email_subject = "VPN"
-    else:
-        email_subject = "Telegram"
+    is_vpn_channel = (chat_username in vpn_list or chat_id_str in vpn_list)
+    email_subject = "VPN" if is_vpn_channel else "Telegram"
 
     if chat_username:
         base_url = f"https://t.me/{chat_username}"
@@ -186,7 +184,7 @@ async def process_messages(messages, chat_entity, vpn_list, mark_read=False):
     media_html = ""
     poll_html = ""
 
-    IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.gif', '.webp')
+    total_size = sum(getattr(msg.file, 'size', 0) for msg in messages if msg.media)
 
     for msg in messages:
         if not msg.media:
@@ -212,17 +210,17 @@ async def process_messages(messages, chat_entity, vpn_list, mark_read=False):
             """
             continue
 
-        # Проверяем, является ли файл изображением
-        is_image = False
-        if msg.file and msg.file.ext:
-            is_image = msg.file.ext.lower() in IMAGE_EXTENSIONS
+        file_size = getattr(msg.file, 'size', 0)
+        is_photo = bool(msg.photo or (msg.file and msg.file.mime_type and msg.file.mime_type.startswith('image/')))
 
-        # Все не-картинки отправляем сразу на Koofr. Картинки превышающие лимит — тоже на Koofr.
-        if not is_image or (msg.file and msg.file.size >= MAX_EMAIL_SIZE):
+        # Определяем, нужно ли отправлять файл на Koofr:
+        # 1. Если каналы НЕ из списка VPN, отправляем на Koofr ВСЁ, кроме изображений.
+        # 2. Если каналы из списка VPN или это изображение, проверяем превышение лимита в 24 МБ.
+        if (not is_vpn_channel and not is_photo) or (total_size >= MAX_EMAIL_SIZE or file_size >= MAX_EMAIL_SIZE):
             path = await msg.download_media(file=LARGE_MEDIA_PATH)
             if path and os.path.exists(path):
                 f_name = os.path.basename(path)
-                print(f"📦 Выгружаем файл на Koofr: {f_name}")
+                print(f"💾 Загружаем файл {f_name} на Koofr...")
                 uploaded_name = await upload_to_koofr_webdav(path, f_name)
                 
                 if uploaded_name:
@@ -232,7 +230,6 @@ async def process_messages(messages, chat_entity, vpn_list, mark_read=False):
                 else:
                     media_html += f'<br><p>📦 <b>Файл (ошибка Koofr, сохранен локально):</b> <code>{f_name}</code></p>'
         else:
-            # Картинки в пределах нормального размера отправляем как вложение в письмо
             path = await msg.download_media(file=RAM_PATH)
             if path and os.path.exists(path):
                 f_name = os.path.basename(path)
@@ -242,7 +239,13 @@ async def process_messages(messages, chat_entity, vpn_list, mark_read=False):
                 
                 files.append((f_data, f_name, cid))
                 os.remove(path)
-                media_html += f'<br><img src="cid:{cid}" style="max-width: 100%;"><br>'
+                
+                if f_name.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp')):
+                    media_html += f'<br><img src="cid:{cid}" style="max-width: 100%;"><br>'
+                elif f_name.lower().endswith(('.mp3', '.ogg', '.wav', '.m4a')):
+                    media_html += f'<br><p>🎵 Аудиофайл: {f_name}</p>'
+                else:
+                    media_html += f'<br><p>📎 Вложение: {f_name}</p>'
     
     local_time = first_msg.date + timedelta(hours=5)
     pub_date = local_time.strftime("%d.%m.%Y %H:%M:%S")
@@ -331,4 +334,4 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
-                
+        
