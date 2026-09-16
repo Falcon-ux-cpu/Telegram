@@ -26,7 +26,7 @@ MAX_EMAIL_SIZE = 24 * 1024 * 1024
 # Данные для Koofr WebDAV
 KOOFR_EMAIL = os.getenv('KOOFR_EMAIL')
 KOOFR_PASS = os.getenv('KOOFR_PASS')
-KOOFR_WEBDAV_BASE = "https://app.koofr.net/dav/Koofr/OMV/Github"
+KOOFR_WEBDAV_BASE = "https://app.koofr.net/dav/Koofr/Github Actions/Telegram"
 
 # Прямая ссылка на RAW-версию твоего Gist со списком VPN-каналов
 VPN_GIST_URL = os.getenv('VPN_GIST_URL', '')
@@ -83,7 +83,7 @@ async def upload_to_koofr_webdav(local_path, original_filename):
     
     async with httpx.AsyncClient(auth=auth, timeout=timeout) as http_client:
         try:
-            # Автоматическое создание целевых папок /OMV/Github если они еще не созданы
+            # Автоматическое создание целевых папок /Github Actions/Telegram если они еще не созданы
             for path_part in ["Github Actions", "Github Actions/Telegram"]:
                 folder_url = f"https://app.koofr.net/dav/Koofr/{path_part}"
                 await http_client.request("MKCOL", folder_url)
