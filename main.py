@@ -6,7 +6,7 @@ import mimetypes
 import uuid
 from datetime import timedelta
 from email.message import EmailMessage
-import httpx  # Используется для REST API Яндекса и загрузки Gist
+import httpx  # Используется для WebDAV Koofr и загрузки Gist
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.types import MessageMediaPoll, MessageEntityTextUrl
@@ -22,7 +22,11 @@ SENDER_EMAIL = os.getenv('MAIL_SENDER')
 SENDER_PASS = os.getenv('MAIL_PASS')
 RECEIVER_EMAIL = os.getenv('MAIL_RECEIVER')
 MAX_EMAIL_SIZE = 24 * 1024 * 1024 
-YANDEX_DISK_TOKEN = os.getenv('YANDEX_DISK_TOKEN')
+
+# Данные для Koofr WebDAV
+KOOFR_EMAIL = os.getenv('KOOFR_EMAIL')
+KOOFR_PASS = os.getenv('KOOFR_PASS')
+KOOFR_WEBDAV_BASE = "https://app.koofr.net/dav/Koofr/OMV/Github"
 
 # Прямая ссылка на RAW-версию твоего Gist со списком VPN-каналов
 VPN_GIST_URL = os.getenv('VPN_GIST_URL', '')
@@ -47,7 +51,6 @@ async def fetch_vpn_channels_list():
             res = await http_client.get(VPN_GIST_URL)
             if res.status_code == 200:
                 lines = res.text.splitlines()
-                # Очищаем строки, убираем @, пустые строки и пробелы
                 vpn_list = set()
                 for line in lines:
                     item = line.strip().lstrip('@').lower()
@@ -66,45 +69,38 @@ def read_file_sync(path):
     with open(path, "rb") as f:
         return f.read()
 
-async def upload_to_yandex_disk(local_path, filename):
-    if not YANDEX_DISK_TOKEN:
-        print("❌ Ошибка: YANDEX_DISK_TOKEN не задан в secrets!")
+async def upload_to_koofr_webdav(local_path, original_filename):
+    if not KOOFR_EMAIL or not KOOFR_PASS:
+        print("❌ Ошибка: KOOFR_EMAIL или KOOFR_PASS не заданы в secrets!")
         return None
 
-    unique_filename = f"{uuid.uuid4().hex[:8]}_{filename}"
-    headers = {"Authorization": f"OAuth {YANDEX_DISK_TOKEN}"}
+    # Генерация случайного имени файла (сохраняя расширение)
+    _, ext = os.path.splitext(original_filename)
+    random_filename = f"{uuid.uuid4().hex}{ext}"
+
+    auth = (KOOFR_EMAIL, KOOFR_PASS)
     timeout = httpx.Timeout(900.0, connect=90.0)
     
-    async with httpx.AsyncClient(timeout=timeout) as http_client:
+    async with httpx.AsyncClient(auth=auth, timeout=timeout) as http_client:
         try:
-            get_upload_url = "https://cloud-api.yandex.net/v1/disk/resources/upload"
-            params = {"path": f"/{unique_filename}", "overwrite": "true"}
-            
-            url_res = await http_client.get(get_upload_url, params=params, headers=headers)
-            if url_res.status_code != 200:
-                return None
-                
-            upload_url = url_res.json().get("href")
-            if not upload_url:
-                return None
+            # Автоматическое создание целевых папок /OMV/Github если они еще не созданы
+            for path_part in ["OMV", "OMV/Github"]:
+                folder_url = f"https://app.koofr.net/dav/Koofr/{path_part}"
+                await http_client.request("MKCOL", folder_url)
 
+            # Загрузка файла
+            file_url = f"{KOOFR_WEBDAV_BASE}/{random_filename}"
             file_content = await asyncio.to_thread(read_file_sync, local_path)
-            upload_res = await http_client.put(upload_url, content=file_content)
-                
-            if upload_res.status_code not in (201, 202):
+            
+            upload_res = await http_client.put(file_url, content=file_content)
+            
+            if upload_res.status_code in (200, 201, 204):
+                return random_filename
+            else:
+                print(f"❌ Ошибка загрузки WebDAV: Статус {upload_res.status_code}")
                 return None
-            
-            publish_url = "https://cloud-api.yandex.net/v1/disk/resources/publish"
-            pub_res = await http_client.put(publish_url, params={"path": f"/{unique_filename}"}, headers=headers)
-            
-            if pub_res.status_code == 200:
-                meta_url = "https://cloud-api.yandex.net/v1/disk/resources"
-                meta_res = await http_client.get(meta_url, params={"path": f"/{unique_filename}"}, headers=headers)
-                if meta_res.status_code == 200:
-                    return meta_res.json().get("public_url")
-            return None
         except Exception as e:
-            print(f"❌ Ошибка Яндекс Диска: {e!r}")
+            print(f"❌ Ошибка при работе с Koofr WebDAV: {e!r}")
             return None
 
 async def send_mail_worker():
@@ -222,15 +218,15 @@ async def process_messages(messages, chat_entity, vpn_list, mark_read=False):
             path = await msg.download_media(file=LARGE_MEDIA_PATH)
             if path and os.path.exists(path):
                 f_name = os.path.basename(path)
-                print(f"💾 Файл {f_name} превысил лимит. Выгружаем на Яндекс Диск...")
-                yandex_url = await upload_to_yandex_disk(path, f_name)
+                print(f"💾 Файл {f_name} превысил лимит. Выгружаем на Koofr...")
+                uploaded_name = await upload_to_koofr_webdav(path, f_name)
                 
-                if yandex_url:
-                    media_html += f'<br><p>📦 <b>Большой файл (загружен на Яндекс Диск):</b> <a href="{yandex_url}">{f_name}</a></p>'
+                if uploaded_name:
+                    media_html += f'<br><p>📦 <b>Большой файл (загружен на Koofr):</b> <code>{uploaded_name}</code></p>'
                     if os.path.exists(path):
                         os.remove(path)
                 else:
-                    media_html += f'<br><p>📦 <b>Большой файл (ошибка Я.Диска, сохранен локально):</b> <code>{f_name}</code></p>'
+                    media_html += f'<br><p>📦 <b>Большой файл (ошибка Koofr, сохранен локально):</b> <code>{f_name}</code></p>'
         else:
             path = await msg.download_media(file=RAM_PATH)
             if path and os.path.exists(path):
@@ -336,3 +332,4 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
+            
