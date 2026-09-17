@@ -6,7 +6,7 @@ import mimetypes
 import uuid
 from datetime import timedelta
 from email.message import EmailMessage
-import httpx  # Используется для WebDAV Koofr и загрузки Gist
+import httpx  # Используется для загрузки Gist
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.types import MessageMediaPoll, MessageEntityTextUrl
@@ -21,21 +21,13 @@ SMTP_PORT = 465
 SENDER_EMAIL = os.getenv('MAIL_SENDER')
 SENDER_PASS = os.getenv('MAIL_PASS')
 RECEIVER_EMAIL = os.getenv('MAIL_RECEIVER')
-MAX_EMAIL_SIZE = 24 * 1024 * 1024 
-
-# Данные для Koofr WebDAV
-KOOFR_EMAIL = os.getenv('KOOFR_EMAIL')
-KOOFR_PASS = os.getenv('KOOFR_PASS')
-KOOFR_WEBDAV_BASE = "https://app.koofr.net/dav/Koofr/Github Actions/Telegram"
+MAX_EMAIL_SIZE = 24 * 1024 * 1024  # 24 МБ (безопасный порог для 25 МБ лимита)
 
 # Прямая ссылка на RAW-версию твоего Gist со списком VPN-каналов
 VPN_GIST_URL = os.getenv('VPN_GIST_URL', '')
 
 RAM_PATH = os.path.join(os.getcwd(), 'temp_media')
 os.makedirs(RAM_PATH, exist_ok=True)
-
-LARGE_MEDIA_PATH = os.path.join(os.getcwd(), 'saved_large_media')
-os.makedirs(LARGE_MEDIA_PATH, exist_ok=True)
 
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 mail_queue = asyncio.Queue()
@@ -64,44 +56,6 @@ async def fetch_vpn_channels_list():
         print(f"⚠️ Не удалось загрузить список VPN-каналов из Gist: {e}")
     
     return set()
-
-def read_file_sync(path):
-    with open(path, "rb") as f:
-        return f.read()
-
-async def upload_to_koofr_webdav(local_path, original_filename):
-    if not KOOFR_EMAIL or not KOOFR_PASS:
-        print("❌ Ошибка: KOOFR_EMAIL или KOOFR_PASS не заданы в secrets!")
-        return None
-
-    # Генерация случайного имени файла (сохраняя расширение)
-    _, ext = os.path.splitext(original_filename)
-    random_filename = f"{uuid.uuid4().hex}{ext}"
-
-    auth = (KOOFR_EMAIL, KOOFR_PASS)
-    timeout = httpx.Timeout(900.0, connect=90.0)
-    
-    async with httpx.AsyncClient(auth=auth, timeout=timeout) as http_client:
-        try:
-            # Автоматическое создание целевых папок /Github Actions/Telegram если они еще не созданы
-            for path_part in ["Github Actions", "Github Actions/Telegram"]:
-                folder_url = f"https://app.koofr.net/dav/Koofr/{path_part}"
-                await http_client.request("MKCOL", folder_url)
-
-            # Загрузка файла
-            file_url = f"{KOOFR_WEBDAV_BASE}/{random_filename}"
-            file_content = await asyncio.to_thread(read_file_sync, local_path)
-            
-            upload_res = await http_client.put(file_url, content=file_content)
-            
-            if upload_res.status_code in (200, 201, 204):
-                return random_filename
-            else:
-                print(f"❌ Ошибка загрузки WebDAV: Статус {upload_res.status_code}")
-                return None
-        except Exception as e:
-            print(f"❌ Ошибка при работе с Koofr WebDAV: {e!r}")
-            return None
 
 async def send_mail_worker():
     while not mail_queue.empty():
@@ -211,24 +165,12 @@ async def process_messages(messages, chat_entity, vpn_list, mark_read=False):
             continue
 
         file_size = getattr(msg.file, 'size', 0)
-        is_photo = bool(msg.photo or (msg.file and msg.file.mime_type and msg.file.mime_type.startswith('image/')))
 
-        # Определяем, нужно ли отправлять файл на Koofr:
-        # 1. Если каналы НЕ из списка VPN, отправляем на Koofr ВСЁ, кроме изображений.
-        # 2. Если каналы из списка VPN или это изображение, проверяем превышение лимита в 24 МБ.
-        if (not is_vpn_channel and not is_photo) or (total_size >= MAX_EMAIL_SIZE or file_size >= MAX_EMAIL_SIZE):
-            path = await msg.download_media(file=LARGE_MEDIA_PATH)
-            if path and os.path.exists(path):
-                f_name = os.path.basename(path)
-                print(f"💾 Загружаем файл {f_name} на Koofr...")
-                uploaded_name = await upload_to_koofr_webdav(path, f_name)
-                
-                if uploaded_name:
-                    media_html += f'<br><p>📦 <b>Файл (загружен на Koofr):</b> <code>{uploaded_name}</code></p>'
-                    if os.path.exists(path):
-                        os.remove(path)
-                else:
-                    media_html += f'<br><p>📦 <b>Файл (ошибка Koofr, сохранен локально):</b> <code>{f_name}</code></p>'
+        # Пропускаем файл, если его размер (или общий размер альбома) превышает 24-25 МБ
+        if total_size >= MAX_EMAIL_SIZE or file_size >= MAX_EMAIL_SIZE:
+            f_name = getattr(msg.file, 'name', 'media_file') or 'media_file'
+            print(f"⚠️ Файл {f_name} ({round(file_size / (1024*1024), 2)} МБ) превышает лимит почты. Пропускаем.")
+            media_html += f'<br><p style="color: #888;">⚠️ <i>Вложение пропущено (превышен лимит 25 МБ): {f_name}</i></p>'
         else:
             path = await msg.download_media(file=RAM_PATH)
             if path and os.path.exists(path):
@@ -334,4 +276,3 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
-        
